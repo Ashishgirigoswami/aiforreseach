@@ -101,7 +101,7 @@ export default function DiscoverPage() {
     setPapers([]);
     try {
       const sources = activeSources.join(",");
-      const res = await fetch(`/api/papers/search?q=${encodeURIComponent(searchQuery)}&sources=${sources}`);
+      const res = await fetch(`https://aiforreseach.onrender.com/api/papers/search?q=${encodeURIComponent(searchQuery)}&sources=${sources}`);
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json() as { results: PaperResult[]; total: number; query: string };
       setPapers(data.results ?? []);
