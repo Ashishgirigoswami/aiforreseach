@@ -54,7 +54,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     setStatus("thinking");
 
     try {
-      const res = await fetch(endpoint, {
+      const base = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+      const res = await fetch(`${base}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
