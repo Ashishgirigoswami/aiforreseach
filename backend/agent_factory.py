@@ -45,7 +45,7 @@ class StreamingCallbackHandler(AsyncCallbackHandler):
 
 def create_llm(temperature: float = 0.3, callbacks=None):
     return ChatAnthropic(
-        model="claude-3-5-haiku-20241022",
+        model="claude-sonnet-4-0",
         temperature=temperature,
         streaming=True,
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
