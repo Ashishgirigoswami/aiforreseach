@@ -3,11 +3,10 @@ Shared LangChain/LangGraph agent factory and SSE streaming helpers.
 """
 import json
 import os
-from typing import AsyncGenerator, Any, Callable
+from typing import AsyncGenerator, Callable
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
-from langchain_core.callbacks.base import AsyncCallbackHandler
 from langgraph.prebuilt import create_react_agent
 
 
@@ -16,41 +15,29 @@ def make_sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
-class StreamingCallbackHandler(AsyncCallbackHandler):
-    """Collect streaming events into a queue."""
-
-    def __init__(self, queue):
-        self.queue = queue
-
-    async def on_llm_new_token(self, token: str, **kwargs):
-        await self.queue.put({"type": "token", "content": token})
-
-    async def on_tool_start(self, serialized: dict, input_str: str, run_id=None,
-                            parent_run_id=None, tags=None, metadata=None,
-                            inputs=None, **kwargs):
-        name = serialized.get("name", "tool") if isinstance(serialized, dict) else "tool"
-        snippet = str(input_str)[:200] if input_str else ""
-        await self.queue.put({"type": "tool_start", "tool": name, "input": snippet})
-
-    async def on_tool_end(self, output: Any, **kwargs):
-        snippet = str(output)[:500] if output else ""
-        await self.queue.put({"type": "tool_end", "output": snippet})
-
-    async def on_llm_error(self, error: Exception, **kwargs):
-        await self.queue.put({"type": "error", "content": str(error)})
-
-    async def on_chain_error(self, error: Exception, **kwargs):
-        await self.queue.put({"type": "error", "content": str(error)})
-
 
 def create_llm(temperature: float = 0.3, callbacks=None):
     return ChatAnthropic(
-        model="claude-sonnet-4-0",
+        model="claude-3-haiku-20240307",
         temperature=temperature,
         streaming=True,
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
         callbacks=callbacks or [],
     )
+
+
+def _extract_text(content) -> str:
+    """Extract plain text from an AIMessage content (str or list of blocks)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "".join(parts)
+    return ""
 
 
 async def run_agent_stream(
@@ -61,11 +48,7 @@ async def run_agent_stream(
     temperature: float = 0.3,
 ) -> str:
     """Run a LangGraph ReAct agent and stream events via `send`."""
-    import asyncio
-
-    queue: asyncio.Queue = asyncio.Queue()
-    handler = StreamingCallbackHandler(queue)
-    llm = create_llm(temperature, callbacks=[handler])
+    llm = create_llm(temperature)
 
     agent = create_react_agent(
         model=llm,
@@ -75,29 +58,36 @@ async def run_agent_stream(
 
     final_output = ""
 
-    async def consume_queue():
-        while True:
-            try:
-                event = queue.get_nowait()
-                await send(event)
-            except Exception:
-                break
-
-    stream = agent.astream(
+    async for event in agent.astream_events(
         {"messages": [HumanMessage(content=user_input)]},
-        stream_mode="values",
-    )
+        version="v2",
+    ):
+        kind = event["event"]
 
-    async for chunk in stream:
-        await consume_queue()
-        messages = chunk.get("messages", [])
-        for msg in messages:
-            if hasattr(msg, "type") and msg.type == "ai" and isinstance(msg.content, str) and msg.content.strip():
-                final_output = msg.content
-            elif msg.__class__.__name__ == "AIMessage" and isinstance(msg.content, str) and msg.content.strip():
-                final_output = msg.content
+        if kind == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            text = _extract_text(chunk.content)
+            if text:
+                await send({"type": "token", "content": text})
 
-    await consume_queue()
+        elif kind == "on_tool_start":
+            tool_name = event.get("name", "tool")
+            input_data = str(event["data"].get("input", ""))[:200]
+            await send({"type": "tool_start", "tool": tool_name, "input": input_data})
+
+        elif kind == "on_tool_end":
+            output = str(event["data"].get("output", ""))[:500]
+            await send({"type": "tool_end", "output": output})
+
+        elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+            messages = event["data"].get("output", {}).get("messages", [])
+            for msg in reversed(messages):
+                if msg.__class__.__name__ in ("AIMessage", "AIMessageChunk"):
+                    text = _extract_text(msg.content)
+                    if text.strip():
+                        final_output = text
+                        break
+
     return final_output
 
 
